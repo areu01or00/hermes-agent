@@ -1266,6 +1266,8 @@ class HermesCLI:
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
+        self._btw_tasks: Dict[str, threading.Thread] = {}
+        self._btw_task_counter = 0
 
     def _invalidate(self, min_interval: float = 0.25) -> None:
         """Throttled UI repaint — prevents terminal blinking on slow/SSH connections."""
@@ -3829,6 +3831,8 @@ class HermesCLI:
             self._handle_rollback_command(cmd_original)
         elif canonical == "stop":
             self._handle_stop_command()
+        elif canonical == "btw":
+            self._handle_btw_command(cmd_original)
         elif canonical == "background":
             self._handle_background_command(cmd_original)
         elif canonical == "queue":
@@ -4101,6 +4105,127 @@ class HermesCLI:
 
         thread = threading.Thread(target=run_background, daemon=True, name=f"bg-task-{task_id}")
         self._background_tasks[task_id] = thread
+        thread.start()
+
+    def _handle_btw_command(self, cmd: str):
+        """Handle /btw <question> — ask an ephemeral side question without tools."""
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            _cprint("  Usage: /btw <question>")
+            _cprint("  Example: /btw remind me what module owns session titles")
+            _cprint("  This runs as an ephemeral side question and does not alter the main session history.")
+            return
+
+        question = parts[1].strip()
+        self._btw_task_counter += 1
+        task_num = self._btw_task_counter
+        task_id = f"btw_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+        if not self._ensure_runtime_credentials():
+            _cprint("  (>_<) Cannot start /btw: no valid credentials.")
+            return
+
+        turn_route = self._resolve_turn_agent_config(question)
+        history_snapshot = list(self.conversation_history)
+        btw_prompt = (
+            "[Ephemeral /btw side question. You are answering a quick follow-up using the current "
+            "session context. Do not call tools. Do not modify files. Answer directly and concisely.]\n\n"
+            f"{question}"
+        )
+
+        _cprint(f"  💬 /btw #{task_num} started: \"{question[:60]}{'...' if len(question) > 60 else ''}\"")
+        _cprint("  Side answer will appear here without interrupting the main session.\n")
+
+        def run_btw():
+            try:
+                btw_agent = AIAgent(
+                    model=turn_route["model"],
+                    api_key=turn_route["runtime"].get("api_key"),
+                    base_url=turn_route["runtime"].get("base_url"),
+                    provider=turn_route["runtime"].get("provider"),
+                    api_mode=turn_route["runtime"].get("api_mode"),
+                    acp_command=turn_route["runtime"].get("command"),
+                    acp_args=turn_route["runtime"].get("args"),
+                    max_iterations=max(1, min(self.max_turns, 8)),
+                    enabled_toolsets=["__btw_no_tools__"],
+                    quiet_mode=True,
+                    verbose_logging=False,
+                    session_id=task_id,
+                    platform="cli",
+                    reasoning_config=self.reasoning_config,
+                    providers_allowed=self._providers_only,
+                    providers_ignored=self._providers_ignore,
+                    providers_order=self._providers_order,
+                    provider_sort=self._provider_sort,
+                    provider_require_parameters=self._provider_require_params,
+                    provider_data_collection=self._provider_data_collection,
+                    fallback_model=self._fallback_model,
+                    session_db=None,
+                    skip_memory=True,
+                    persist_session=False,
+                )
+
+                result = btw_agent.run_conversation(
+                    user_message=btw_prompt,
+                    conversation_history=history_snapshot,
+                    task_id=task_id,
+                    sync_honcho=False,
+                )
+
+                response = result.get("final_response", "") if result else ""
+                if not response and result and result.get("error"):
+                    response = f"Error: {result['error']}"
+
+                if self._app:
+                    self._app.invalidate()
+                    import time as _tmod
+                    _tmod.sleep(0.05)
+                print()
+                ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+                _cprint(f"  💬 /btw #{task_num}")
+                _cprint(f"  Question: \"{question[:60]}{'...' if len(question) > 60 else ''}\"")
+                ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+                if response:
+                    try:
+                        from hermes_cli.skin_engine import get_active_skin
+                        _skin = get_active_skin()
+                        _resp_color = _skin.get_color("response_border", "#4F6D4A")
+                        _resp_text = _skin.get_color("banner_text", "#FFF8DC")
+                    except Exception:
+                        _resp_color = "#4F6D4A"
+                        _resp_text = "#FFF8DC"
+
+                    _chat_console = ChatConsole()
+                    _chat_console.print(Panel(
+                        _rich_text_from_ansi(response),
+                        title=f"[{_resp_color} bold]⚕ Hermes (/btw #{task_num})[/]",
+                        title_align="left",
+                        border_style=_resp_color,
+                        style=_resp_text,
+                        box=rich_box.HORIZONTALS,
+                        padding=(1, 2),
+                    ))
+                else:
+                    _cprint("  (No response generated)")
+
+                if self.bell_on_complete:
+                    sys.stdout.write("\a")
+                    sys.stdout.flush()
+
+            except Exception as e:
+                if self._app:
+                    self._app.invalidate()
+                    import time as _tmod
+                    _tmod.sleep(0.05)
+                print()
+                _cprint(f"  ❌ /btw #{task_num} failed: {e}")
+            finally:
+                self._btw_tasks.pop(task_id, None)
+                if self._app:
+                    self._invalidate(min_interval=0)
+
+        thread = threading.Thread(target=run_btw, daemon=True, name=f"btw-task-{task_id}")
+        self._btw_tasks[task_id] = thread
         thread.start()
 
     @staticmethod

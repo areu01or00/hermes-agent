@@ -24,6 +24,7 @@ import signal
 import tempfile
 import threading
 import time
+import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
@@ -416,6 +417,7 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        self._active_btw_tasks: Dict[str, asyncio.Task] = {}
 
     def _get_or_create_gateway_honcho(self, session_key: str):
         """Return a persistent Honcho manager/config pair for this gateway session."""
@@ -1650,6 +1652,10 @@ class GatewayRunner:
                     adapter._pending_messages[_quick_key] = queued_event
                 return "Queued for the next turn."
 
+            # /btw <question> — run an ephemeral side-question without interrupting
+            if _cmd_def_inner and _cmd_def_inner.name == "btw":
+                return await self._handle_btw_command(event)
+
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key[:20])
                 adapter = self.adapters.get(source.platform)
@@ -1800,6 +1806,9 @@ class GatewayRunner:
 
         if canonical == "background":
             return await self._handle_background_command(event)
+
+        if canonical == "btw":
+            return await self._handle_btw_command(event)
 
         if canonical == "voice":
             return await self._handle_voice_command(event)
@@ -3806,6 +3815,170 @@ class GatewayRunner:
                 await adapter.send(
                     chat_id=source.chat_id,
                     content=f"❌ Background task {task_id} failed: {e}",
+                    metadata=_thread_metadata,
+                )
+            except Exception:
+                pass
+
+    async def _handle_btw_command(self, event: MessageEvent) -> str:
+        """Handle /btw <question> — answer an ephemeral side question in chat."""
+        question = event.get_command_args().strip()
+        if not question:
+            return (
+                "Usage: /btw <question>\n"
+                "Example: /btw what module owns session title sanitization?\n\n"
+                "Runs an ephemeral no-tools side question in the same chat/thread."
+            )
+
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        existing = self._active_btw_tasks.get(session_key)
+        if existing and not existing.done():
+            return "A /btw side question is already running for this chat. Wait for it to finish, then send another."
+
+        task_id = f"btw_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        _task = asyncio.create_task(self._run_btw_task(question, source, session_key, task_id))
+        self._background_tasks.add(_task)
+        self._active_btw_tasks[session_key] = _task
+
+        def _cleanup(task):
+            self._background_tasks.discard(task)
+            current = self._active_btw_tasks.get(session_key)
+            if current is task:
+                self._active_btw_tasks.pop(session_key, None)
+
+        _task.add_done_callback(_cleanup)
+
+        preview = question[:60] + ("..." if len(question) > 60 else "")
+        return f'💬 /btw started: "{preview}"\nReply will appear here without interrupting the main session.'
+
+    async def _run_btw_task(
+        self, question: str, source: "SessionSource", session_key: str, task_id: str
+    ) -> None:
+        """Execute an ephemeral /btw side-question and deliver the answer."""
+        from run_agent import AIAgent
+
+        adapter = self.adapters.get(source.platform)
+        if not adapter:
+            logger.warning("No adapter for platform %s in /btw task %s", source.platform, task_id)
+            return
+
+        _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+
+        try:
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
+            if not runtime_kwargs.get("api_key"):
+                await adapter.send(
+                    source.chat_id,
+                    "❌ /btw failed: no provider credentials configured.",
+                    metadata=_thread_metadata,
+                )
+                return
+
+            user_config = _load_gateway_config()
+            model = _resolve_gateway_model(user_config)
+            platform_key = _platform_config_key(source.platform)
+
+            pr = self._provider_routing
+            reasoning_config = self._load_reasoning_config()
+            self._reasoning_config = reasoning_config
+            turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
+
+            running_agent = self._running_agents.get(session_key)
+            if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+                history_snapshot = list(getattr(running_agent, "_session_messages", []) or [])
+            else:
+                session_entry = self.session_store.get_or_create_session(source)
+                history_snapshot = self.session_store.load_transcript(session_entry.session_id)
+
+            btw_prompt = (
+                "[Ephemeral /btw side question. You are answering a quick follow-up using the current "
+                "session context. Do not call tools. Do not modify files. Answer directly and concisely.]\n\n"
+                f"{question}"
+            )
+
+            def run_sync():
+                agent = AIAgent(
+                    model=turn_route["model"],
+                    **turn_route["runtime"],
+                    max_iterations=8,
+                    quiet_mode=True,
+                    verbose_logging=False,
+                    enabled_toolsets=["__btw_no_tools__"],
+                    reasoning_config=reasoning_config,
+                    providers_allowed=pr.get("only"),
+                    providers_ignored=pr.get("ignore"),
+                    providers_order=pr.get("order"),
+                    provider_sort=pr.get("sort"),
+                    provider_require_parameters=pr.get("require_parameters", False),
+                    provider_data_collection=pr.get("data_collection"),
+                    session_id=task_id,
+                    platform=platform_key,
+                    session_db=None,
+                    fallback_model=self._fallback_model,
+                    skip_memory=True,
+                    persist_session=False,
+                )
+
+                return agent.run_conversation(
+                    user_message=btw_prompt,
+                    conversation_history=history_snapshot,
+                    task_id=task_id,
+                    sync_honcho=False,
+                )
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, run_sync)
+
+            response = result.get("final_response", "") if result else ""
+            if not response and result and result.get("error"):
+                response = f"Error: {result['error']}"
+            if not response:
+                response = "(No response generated)"
+
+            media_files, response = adapter.extract_media(response)
+            images, text_content = adapter.extract_images(response)
+            preview = question[:60] + ("..." if len(question) > 60 else "")
+            header = f'💬 /btw\nQuestion: "{preview}"\n\n'
+
+            if text_content:
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=header + text_content,
+                    metadata=_thread_metadata,
+                )
+            elif not images and not media_files:
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=header + "(No response generated)",
+                    metadata=_thread_metadata,
+                )
+
+            for image_url, alt_text in (images or []):
+                try:
+                    await adapter.send_image(
+                        chat_id=source.chat_id,
+                        image_url=image_url,
+                        caption=alt_text,
+                    )
+                except Exception:
+                    pass
+
+            for media_path in (media_files or []):
+                try:
+                    await adapter.send_file(
+                        chat_id=source.chat_id,
+                        file_path=media_path,
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.exception("/btw task %s failed", task_id)
+            try:
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=f"❌ /btw failed: {e}",
                     metadata=_thread_metadata,
                 )
             except Exception:

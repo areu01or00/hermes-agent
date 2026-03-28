@@ -31,6 +31,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/compress` | Manually compress conversation context (flush memories + summarize) |
 | `/rollback` | List or restore filesystem checkpoints (usage: /rollback [number]) |
 | `/stop` | Kill all running background processes |
+| `/btw <question>` | Ask an ephemeral side question in parallel with the main session. Hermes snapshots the current conversation context, answers with a no-tools helper agent, and does not write the exchange back into the main session history. |
 | `/queue <prompt>` (alias: `/q`) | Queue a prompt for the next turn (doesn't interrupt the current agent response) |
 | `/resume [name]` | Resume a previously-named session |
 | `/statusbar` (alias: `/sb`) | Toggle the context/model status bar on or off |
@@ -115,6 +116,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/voice [on\|off\|tts\|join\|channel\|leave\|status]` | Control spoken replies in chat. `join`/`channel`/`leave` manage Discord voice-channel mode. |
 | `/rollback [number]` | List or restore filesystem checkpoints. |
 | `/background <prompt>` | Run a prompt in a separate background session. Results are delivered back to the same chat when the task finishes. See [Messaging Background Sessions](/docs/user-guide/messaging/#background-sessions). |
+| `/btw <question>` | Ask an ephemeral side question in the same chat/thread. Hermes snapshots the current session context, answers with a no-tools helper agent, and does not write the `/btw` exchange back into the main session history. |
 | `/plan [request]` | Load the bundled `plan` skill to write a markdown plan instead of executing the work. Plans are saved under `.hermes/plans/` relative to the active workspace/backend working directory. |
 | `/reload-mcp` | Reload MCP servers from config. |
 | `/approve [session\|always]` | Approve and execute a pending dangerous command. `session` approves for this session only; `always` adds to permanent allowlist. |
@@ -128,5 +130,5 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 - `/skin`, `/tools`, `/toolsets`, `/browser`, `/config`, `/prompt`, `/cron`, `/skills`, `/platforms`, `/paste`, `/statusbar`, and `/plugins` are **CLI-only** commands.
 - `/verbose` is **CLI-only by default**, but can be enabled for messaging platforms by setting `display.tool_progress_command: true` in `config.yaml`. When enabled, it cycles the `display.tool_progress` mode and saves to config.
 - `/status`, `/sethome`, `/update`, `/approve`, and `/deny` are **messaging-only** commands.
-- `/background`, `/voice`, `/reload-mcp`, and `/rollback` work in **both** the CLI and the messaging gateway.
+- `/background`, `/btw`, `/voice`, `/reload-mcp`, and `/rollback` work in **both** the CLI and the messaging gateway.
 - `/voice join`, `/voice channel`, and `/voice leave` are only meaningful on Discord.

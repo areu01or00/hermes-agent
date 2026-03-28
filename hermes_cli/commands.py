@@ -65,6 +65,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[session|always]"),
     CommandDef("deny", "Deny a pending dangerous command", "Session",
                gateway_only=True),
+    CommandDef("btw", "Ask an ephemeral side question without interrupting", "Session",
+               args_hint="<question>"),
     CommandDef("background", "Run a prompt in the background", "Session",
                aliases=("bg",), args_hint="<prompt>"),
     CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",

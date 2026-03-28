@@ -429,6 +429,7 @@ class AIAgent:
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
+        persist_session: bool = True,
     ):
         """
         Initialize the AI Agent.
@@ -468,6 +469,8 @@ class AIAgent:
             skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
                 into the system prompt. Use this for batch processing and data generation to avoid
                 polluting trajectories with user-specific persona or project instructions.
+            persist_session (bool): When False, skip session log and SQLite persistence for this
+                agent run. Useful for ephemeral helper flows like side questions.
             honcho_session_key (str): Session key for Honcho integration (e.g., "telegram:123456" or CLI session_id).
                 When provided and Honcho is enabled in config, enables persistent cross-session user modeling.
             honcho_manager: Optional shared HonchoSessionManager owned by the caller.
@@ -493,6 +496,7 @@ class AIAgent:
         self._print_fn = None
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
+        self.persist_session = persist_session
         self.pass_session_id = pass_session_id
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
@@ -1582,6 +1586,8 @@ class AIAgent:
 
         Ensures conversations are never lost, even on errors or early returns.
         """
+        if not self.persist_session:
+            return
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
