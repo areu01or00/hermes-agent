@@ -84,3 +84,25 @@ class TestRunBtwTask:
         sent = mock_adapter.send.call_args.kwargs["content"]
         assert "💬 /btw" in sent
         assert "Looks good" in sent
+
+
+class TestHandleMessageBtwDuringActiveRun:
+    @pytest.mark.asyncio
+    async def test_btw_does_not_interrupt_running_agent(self):
+        runner = _make_runner()
+        event = _make_event(text="/btw what owns titles?")
+        session_key = "telegram:12345:67890"
+
+        running_agent = MagicMock()
+        runner._running_agents[session_key] = running_agent
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+        runner._session_key_for_source = MagicMock(return_value=session_key)
+        runner._handle_btw_command = AsyncMock(return_value='💬 /btw: "what owns titles?"\nReply will appear here shortly.')
+
+        result = await runner._handle_message(event)
+
+        assert result == '💬 /btw: "what owns titles?"\nReply will appear here shortly.'
+        runner._handle_btw_command.assert_awaited_once_with(event)
+        running_agent.interrupt.assert_not_called()
+        assert runner._pending_messages == {}
